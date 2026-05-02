@@ -8,29 +8,29 @@ import platform
 import glob
 import re
 import logging
-from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.filters import CommandStart, Command
 import yt_dlp
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Get token from environment variable
+# Get token from environment
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     logger.error("❌ BOT_TOKEN not found in environment variables!")
     exit(1)
 
-logger.info(f"✅ Bot token loaded successfully")
+logger.info("✅ Bot token loaded successfully")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -58,18 +58,18 @@ SUPPORTED_SOURCES = [
 ]
 
 # Set FFmpeg path
-FFMPEG_LOCATION = os.getenv("FFMPEG_PATH", "ffmpeg")
-
+FFMPEG_LOCATION = "ffmpeg"
 logger.info(f"✅ FFmpeg: {FFMPEG_LOCATION}")
 
 
-def get_formats(url):
-    """Extract video info and available formats from URL"""
+def get_ydl_opts(is_audio=False, format_id=None):
+    """Get yt-dlp options with YouTube authentication fixes"""
     ydl_opts = {
-        "quiet": True,
+        "quiet": False,
         "no_warnings": True,
         "socket_timeout": 60,
-
+        "ffmpeg_location": FFMPEG_LOCATION,
+        
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "android", "ios"],
@@ -82,18 +82,26 @@ def get_formats(url):
                 "api": True,
             }
         },
-
+        
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.youtube.com/",
         },
-
-        "socket_timeout": 60,
-        "sleep_interval": 2,
-        "max_sleep_interval": 5,
-        "retries": 3,
+        
+        "sleep_interval": 3,
+        "max_sleep_interval": 10,
+        "retries": 5,
+        "skip_unavailable_fragments": True,
     }
+    
+    return ydl_opts
+
+
+def get_formats(url):
+    """Extract video info and available formats from URL"""
+    ydl_opts = get_ydl_opts()
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -103,12 +111,20 @@ def get_formats(url):
 
     formats_list = []
 
-    logger.debug(f"Total formats available: {len(info.get('formats', []))}")
+    print(f"\n=== DEBUG: Total formats available: {len(info.get('formats', []))} ===")
 
     is_youtube = "youtube" in url or "youtu.be" in url
 
     video_formats = {}
     audio_formats = []
+
+    print("\nAll formats:")
+    for idx, f in enumerate(info.get("formats", [])[:15]):
+        vcodec = f.get("vcodec", "none")
+        acodec = f.get("acodec", "none")
+        height = f.get("height")
+        print(
+            f"  [{idx}] id={f.get('format_id')}, vcodec={vcodec}, acodec={acodec}, height={height}, fps={f.get('fps')}")
 
     for f in info.get("formats", []):
         vcodec = f.get("vcodec", "none")
@@ -119,12 +135,18 @@ def get_formats(url):
         if vcodec != "none" and acodec == "none" and height and height > 0:
             if height not in video_formats:
                 video_formats[height] = format_id
+                print(f"\n✓ Video format found: {height}p (id: {format_id})")
 
         if acodec != "none" and vcodec == "none":
             audio_formats.append(format_id)
 
+    print(f"\nVideo formats found: {len(video_formats)} unique heights")
+    print(f"Audio formats found: {len(audio_formats)}")
+
     if is_youtube and audio_formats and video_formats:
         best_audio = audio_formats[0]
+        print(f"\n🎵 Best audio format: {best_audio}")
+        print(f"\nCombining video+audio formats:")
         for height in sorted(video_formats.keys(), reverse=True):
             video_id = video_formats[height]
             combined_format = f"{video_id}+{best_audio}"
@@ -135,8 +157,10 @@ def get_formats(url):
                 "filesize": 0,
                 "type": "combined_av"
             })
+            print(f"  ✓ {height}p: {combined_format}")
 
     if not formats_list and video_formats:
+        print(f"\n⚠️ Using video-only formats (no audio):")
         for height in sorted(video_formats.keys(), reverse=True):
             formats_list.append({
                 "format_id": video_formats[height],
@@ -145,8 +169,10 @@ def get_formats(url):
                 "filesize": 0,
                 "type": "video_only"
             })
+            print(f"  - {height}p")
 
     if not formats_list:
+        print(f"\n⚠️ Fallback: looking for combined or best formats")
         for f in info.get("formats", []):
             vcodec = f.get("vcodec", "none")
             acodec = f.get("acodec", "none")
@@ -161,8 +187,10 @@ def get_formats(url):
                     "filesize": 0,
                     "type": "combined"
                 })
+                print(f"  - {height}p combined (id: {format_id})")
 
     if not formats_list:
+        print(f"\n🔴 Using last resort: best format")
         formats_list.append({
             "format_id": "best",
             "quality": 720,
@@ -178,6 +206,11 @@ def get_formats(url):
             unique_qualities[quality] = f
 
     unique_formats = sorted(unique_qualities.values(), key=lambda x: x["quality"], reverse=True)
+
+    print(f"\n📊 Final unique formats: {len(unique_formats)}")
+    for uf in unique_formats:
+        print(f"  - {uf['quality']}p (id: {uf['format_id']}, type: {uf['type']})")
+    print(f"=== END DEBUG ===\n")
 
     return info, unique_formats
 
@@ -214,37 +247,8 @@ def download_video(url, format_id, output_dir, base_name, is_audio=False):
     """Download video or audio"""
     os.makedirs(output_dir, exist_ok=True)
 
-    ydl_opts = {
-        "quiet": False,
-        "no_warnings": True,
-        "socket_timeout": 60,
-        "ffmpeg_location": FFMPEG_LOCATION,
-
-        "sleep_interval": 2,
-        "max_sleep_interval": 5,
-        "retries": 3,
-
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web", "android", "ios"],
-                "player_skip": ["js", "configs"],
-            },
-            "instagram": {
-                "android_api": True,
-            },
-            "snapchat": {
-                "api": True,
-            }
-        },
-
-        "outtmpl": os.path.join(output_dir, base_name),
-    }
+    ydl_opts = get_ydl_opts(is_audio=is_audio, format_id=format_id)
+    ydl_opts["outtmpl"] = os.path.join(output_dir, base_name)
 
     if is_audio:
         ydl_opts["format"] = "bestaudio/best"
@@ -260,16 +264,16 @@ def download_video(url, format_id, output_dir, base_name, is_audio=False):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as e:
-        logger.error(f"Download error: {e}")
+        print(f"Download error: {e}")
         raise
 
     downloaded_file = find_downloaded_file(output_dir, base_name)
 
     if not downloaded_file:
-        logger.error(f"Contents of {output_dir}: {os.listdir(output_dir)}")
+        print(f"Contents of {output_dir}: {os.listdir(output_dir)}")
         raise FileNotFoundError(f"Could not find downloaded file with base name: {base_name}")
 
-    logger.info(f"Downloaded file found: {downloaded_file}")
+    print(f"Downloaded file found: {downloaded_file}")
     return downloaded_file
 
 
@@ -310,7 +314,7 @@ async def on_bot_added_to_group(update: types.ChatMemberUpdated):
         chat = update.chat
 
         if chat.type in ["group", "supergroup"]:
-            logger.info(f"Bot added to group: {chat.title} (ID: {chat.id})")
+            logger.info(f"✓ Bot added to group: {chat.title} (ID: {chat.id})")
 
             welcome_msg = (
                 f"👋 Привет! Я бот для скачивания видео.\n\n"
@@ -337,7 +341,7 @@ async def on_bot_added_to_group(update: types.ChatMemberUpdated):
                     parse_mode="HTML"
                 )
             except Exception as e:
-                logger.warning(f"Could not send message to group: {e}")
+                logger.warning(f"⚠️ Could not send message to group: {e}")
 
 
 @dp.message(CommandStart())
@@ -600,10 +604,9 @@ async def callback(call: types.CallbackQuery):
 
         file_size = os.path.getsize(filename)
 
-        # Telegram limit is 2GB, but for safety use 1.5GB
-        if file_size > 1.5 * 1024 * 1024 * 1024:
+        if file_size > 2 * 1024 * 1024 * 1024:
             os.remove(filename)
-            await status.edit_text("❌ Файл слишком большой (макс 1.5GB)")
+            await status.edit_text("❌ Файл слишком большой (макс 2GB)")
             return
 
         await status.edit_text(f"📤 Загружаю ({format_file_size(file_size)})...")
@@ -630,8 +633,6 @@ async def callback(call: types.CallbackQuery):
             await status.delete()
         except:
             pass
-
-        logger.info(f"Successfully processed video: {title}")
 
     except Exception as e:
         logger.error(f"Error in callback: {e}")
