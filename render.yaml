@@ -1,7 +1,7 @@
 services:
   - type: worker
-    name: telegram-video-bot
+    name: Downloader-TG
     env: python
     pythonVersion: 3.11
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python main.py"
+    startCommand: "python Youtube.py"
