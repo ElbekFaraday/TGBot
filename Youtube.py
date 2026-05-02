@@ -7,18 +7,39 @@ import subprocess
 import platform
 import glob
 import re
+import logging
+from pathlib import Path
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.filters import CommandStart, Command
 import yt_dlp
 
-TOKEN = "8686308933:AAH0TLUMzxS3maZaH0T6h7eMGqS6_4YY7BI"
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Get token from environment variable
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("❌ BOT_TOKEN environment variable is not set!")
+
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 video_data = {}
-TEMP_DIR = tempfile.gettempdir()
+TEMP_DIR = os.path.join(tempfile.gettempdir(), "video_downloads")
+
+# Create temp directory
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Supported sources
 SUPPORTED_SOURCES = [
@@ -40,16 +61,38 @@ SUPPORTED_SOURCES = [
 ]
 
 # Set FFmpeg path
-FFMPEG_LOCATION = "ffmpeg"
+FFMPEG_LOCATION = os.getenv("FFMPEG_PATH", "ffmpeg")
 
-print(f"FFmpeg Status: ✅ Found at {FFMPEG_LOCATION}")
+# Check FFmpeg availability
+try:
+    subprocess.run([FFMPEG_LOCATION, "-version"], capture_output=True, check=True)
+    logger.info(f"✅ FFmpeg found at {FFMPEG_LOCATION}")
+except (subprocess.CalledProcessError, FileNotFoundError):
+    logger.warning(f"⚠️ FFmpeg not found at {FFMPEG_LOCATION}. Some features may not work.")
+
+
+def cleanup_temp_files(max_age_seconds=3600):
+    """Clean up old temporary files"""
+    try:
+        current_time = os.path.getmtime(TEMP_DIR)
+        for filename in os.listdir(TEMP_DIR):
+            filepath = os.path.join(TEMP_DIR, filename)
+            file_age = current_time - os.path.getmtime(filepath)
+            if file_age > max_age_seconds:
+                try:
+                    os.remove(filepath)
+                    logger.info(f"🗑️ Cleaned up old file: {filename}")
+                except Exception as e:
+                    logger.warning(f"Could not clean up {filename}: {e}")
+    except Exception as e:
+        logger.warning(f"Error during cleanup: {e}")
 
 
 def get_formats(url):
     """Extract video info and available formats from URL"""
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": not DEBUG,
+        "no_warnings": not DEBUG,
         "socket_timeout": 60,
 
         "extractor_args": {
@@ -71,7 +114,6 @@ def get_formats(url):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
 
-        "socket_timeout": 60,
         "sleep_interval": 2,
         "max_sleep_interval": 5,
         "retries": 3,
@@ -81,24 +123,18 @@ def get_formats(url):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
+        logger.error(f"Failed to extract video info: {str(e)}")
         raise Exception(f"Failed to extract video info: {str(e)}")
 
     formats_list = []
 
-    print(f"\n=== DEBUG: Total formats available: {len(info.get('formats', []))} ===")
+    if DEBUG:
+        logger.info(f"Total formats available: {len(info.get('formats', []))}")
 
     is_youtube = "youtube" in url or "youtu.be" in url
 
     video_formats = {}
     audio_formats = []
-
-    print("\nAll formats:")
-    for idx, f in enumerate(info.get("formats", [])[:15]):
-        vcodec = f.get("vcodec", "none")
-        acodec = f.get("acodec", "none")
-        height = f.get("height")
-        print(
-            f"  [{idx}] id={f.get('format_id')}, vcodec={vcodec}, acodec={acodec}, height={height}, fps={f.get('fps')}")
 
     for f in info.get("formats", []):
         vcodec = f.get("vcodec", "none")
@@ -109,18 +145,16 @@ def get_formats(url):
         if vcodec != "none" and acodec == "none" and height and height > 0:
             if height not in video_formats:
                 video_formats[height] = format_id
-                print(f"\n✓ Video format found: {height}p (id: {format_id})")
 
         if acodec != "none" and vcodec == "none":
             audio_formats.append(format_id)
 
-    print(f"\nVideo formats found: {len(video_formats)} unique heights")
-    print(f"Audio formats found: {len(audio_formats)}")
+    if DEBUG:
+        logger.info(f"Video formats found: {len(video_formats)}, Audio formats: {len(audio_formats)}")
 
+    # For YouTube, combine video and audio
     if is_youtube and audio_formats and video_formats:
         best_audio = audio_formats[0]
-        print(f"\n🎵 Best audio format: {best_audio}")
-        print(f"\nCombining video+audio formats:")
         for height in sorted(video_formats.keys(), reverse=True):
             video_id = video_formats[height]
             combined_format = f"{video_id}+{best_audio}"
@@ -131,10 +165,9 @@ def get_formats(url):
                 "filesize": 0,
                 "type": "combined_av"
             })
-            print(f"  ✓ {height}p: {combined_format}")
 
+    # Fallback to video-only formats
     if not formats_list and video_formats:
-        print(f"\n⚠️ Using video-only formats (no audio):")
         for height in sorted(video_formats.keys(), reverse=True):
             formats_list.append({
                 "format_id": video_formats[height],
@@ -143,10 +176,9 @@ def get_formats(url):
                 "filesize": 0,
                 "type": "video_only"
             })
-            print(f"  - {height}p")
 
+    # Look for combined formats
     if not formats_list:
-        print(f"\n⚠️ Fallback: looking for combined or best formats")
         for f in info.get("formats", []):
             vcodec = f.get("vcodec", "none")
             acodec = f.get("acodec", "none")
@@ -161,10 +193,9 @@ def get_formats(url):
                     "filesize": 0,
                     "type": "combined"
                 })
-                print(f"  - {height}p combined (id: {format_id})")
 
+    # Last resort
     if not formats_list:
-        print(f"\n🔴 Using last resort: best format")
         formats_list.append({
             "format_id": "best",
             "quality": 720,
@@ -173,6 +204,7 @@ def get_formats(url):
             "type": "best"
         })
 
+    # Remove duplicates
     unique_qualities = {}
     for f in sorted(formats_list, key=lambda x: x["quality"], reverse=True):
         quality = f["quality"]
@@ -180,11 +212,6 @@ def get_formats(url):
             unique_qualities[quality] = f
 
     unique_formats = sorted(unique_qualities.values(), key=lambda x: x["quality"], reverse=True)
-
-    print(f"\n📊 Final unique formats: {len(unique_formats)}")
-    for uf in unique_formats:
-        print(f"  - {uf['quality']}p (id: {uf['format_id']}, type: {uf['type']})")
-    print(f"=== END DEBUG ===\n")
 
     return info, unique_formats
 
@@ -222,8 +249,8 @@ def download_video(url, format_id, output_dir, base_name, is_audio=False):
     os.makedirs(output_dir, exist_ok=True)
 
     ydl_opts = {
-        "quiet": False,
-        "no_warnings": True,
+        "quiet": not DEBUG,
+        "no_warnings": not DEBUG,
         "socket_timeout": 60,
         "ffmpeg_location": FFMPEG_LOCATION,
 
@@ -267,16 +294,16 @@ def download_video(url, format_id, output_dir, base_name, is_audio=False):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as e:
-        print(f"Download error: {e}")
+        logger.error(f"Download error: {e}")
         raise
 
     downloaded_file = find_downloaded_file(output_dir, base_name)
 
     if not downloaded_file:
-        print(f"Contents of {output_dir}: {os.listdir(output_dir)}")
+        logger.error(f"Could not find downloaded file with base name: {base_name}")
         raise FileNotFoundError(f"Could not find downloaded file with base name: {base_name}")
 
-    print(f"Downloaded file found: {downloaded_file}")
+    logger.info(f"Downloaded file found: {downloaded_file}")
     return downloaded_file
 
 
@@ -317,7 +344,7 @@ async def on_bot_added_to_group(update: types.ChatMemberUpdated):
         chat = update.chat
 
         if chat.type in ["group", "supergroup"]:
-            print(f"✓ Bot added to group: {chat.title} (ID: {chat.id})")
+            logger.info(f"✓ Bot added to group: {chat.title} (ID: {chat.id})")
 
             welcome_msg = (
                 f"👋 Привет! Я бот для скачивания видео.\n\n"
@@ -344,7 +371,7 @@ async def on_bot_added_to_group(update: types.ChatMemberUpdated):
                     parse_mode="HTML"
                 )
             except Exception as e:
-                print(f"⚠️ Could not send message to group: {e}")
+                logger.warning(f"Could not send message to group: {e}")
 
 
 @dp.message(CommandStart())
@@ -515,7 +542,7 @@ async def handle(message: types.Message):
 
     except Exception as e:
         error_msg = str(e)
-        print(f"Error: {error_msg}")
+        logger.error(f"Error: {error_msg}")
 
         is_tiktok = "tiktok" in url
 
@@ -557,6 +584,7 @@ async def handle(message: types.Message):
 @dp.callback_query(F.data)
 async def callback(call: types.CallbackQuery):
     """Handle quality selection"""
+    filename = None
     try:
         parts = call.data.split("|")
         video_id = parts[0]
@@ -587,7 +615,7 @@ async def callback(call: types.CallbackQuery):
             quality = int(selected_format["quality"])
             status = await call.message.edit_text(f"⬇️ Скачиваю {quality}p...")
 
-        temp_dir = os.path.join(TEMP_DIR, "video_downloads")
+        temp_dir = TEMP_DIR
         base_name = video_id
 
         loop = asyncio.get_event_loop()
@@ -607,9 +635,12 @@ async def callback(call: types.CallbackQuery):
 
         file_size = os.path.getsize(filename)
 
-        if file_size > 2 * 1024 * 1024 * 1024:
-            os.remove(filename)
-            await status.edit_text("❌ Файл слишком большой (макс 2GB)")
+        # Render has 1GB file limit for some plans, so check before upload
+        max_file_size = 1 * 1024 * 1024 * 1024  # 1GB
+        if file_size > max_file_size:
+            if os.path.exists(filename):
+                os.remove(filename)
+            await status.edit_text(f"❌ Файл слишком большой (макс {format_file_size(max_file_size)})")
             return
 
         await status.edit_text(f"📤 Загружаю ({format_file_size(file_size)})...")
@@ -631,14 +662,15 @@ async def callback(call: types.CallbackQuery):
 
         if os.path.exists(filename):
             os.remove(filename)
+            logger.info(f"Cleaned up file: {filename}")
 
         try:
             await status.delete()
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Could not delete status message: {e}")
 
     except Exception as e:
-        print(f"Error in callback: {e}")
+        logger.error(f"Error in callback: {e}")
         error_msg = str(e)
 
         msg = f"❌ Ошибка: {error_msg[:100]}"
@@ -649,18 +681,33 @@ async def callback(call: types.CallbackQuery):
             await call.message.answer(msg)
 
         try:
-            if 'filename' in locals() and os.path.exists(filename):
+            if filename and os.path.exists(filename):
                 os.remove(filename)
-        except:
-            pass
+                logger.info(f"Cleaned up error file: {filename}")
+        except Exception as cleanup_error:
+            logger.warning(f"Could not clean up file: {cleanup_error}")
 
 
 async def main():
     """Start bot"""
-    print("🤖 Bot started...")
-    print(f"FFmpeg: {FFMPEG_LOCATION}")
-    await dp.start_polling(bot)
+    logger.info("🤖 Bot starting...")
+    logger.info(f"FFmpeg path: {FFMPEG_LOCATION}")
+    
+    # Clean up old temporary files before starting
+    cleanup_temp_files()
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+        raise
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Critical error: {e}")
+        raise
