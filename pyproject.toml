@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tg-bot"
+version = "1.0.0"
+description = "Telegram Video Downloader Bot"
+dependencies = [
+    "aiogram>=3.3.0",
+    "yt-dlp",
+    "python-dotenv>=1.0.0",
+]
