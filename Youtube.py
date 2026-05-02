@@ -40,7 +40,7 @@ SUPPORTED_SOURCES = [
 ]
 
 # Set FFmpeg path
-FFMPEG_LOCATION = r"C:\prog\ffmpeg\bin\ffmpeg.exe"
+FFMPEG_LOCATION = "ffmpeg"
 
 print(f"FFmpeg Status: ✅ Found at {FFMPEG_LOCATION}")
 
