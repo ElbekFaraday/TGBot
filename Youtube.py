@@ -1,100 +1,17 @@
-# -*- coding: utf-8 -*-
-import asyncio
-import os
-import uuid
-import tempfile
-import subprocess
-import platform
-import glob
-import re
-import logging
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
-from aiogram.filters import CommandStart, Command
-import yt_dlp
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Get token from environment
-TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
-    logger.error("❌ BOT_TOKEN not found in environment variables!")
-    exit(1)
-
-logger.info("✅ Bot token loaded successfully")
-
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
-
-video_data = {}
-TEMP_DIR = tempfile.gettempdir()
-
-# Supported sources
-SUPPORTED_SOURCES = [
-    "youtube.com",
-    "youtu.be",
-    "instagram.com",
-    "tiktok.com",
-    "vt.tiktok.com",
-    "vm.tiktok.com",
-    "facebook.com",
-    "twitter.com",
-    "x.com",
-    "vimeo.com",
-    "dailymotion.com",
-    "soundcloud.com",
-    "spotify.com",
-    "snapchat.com",
-    "snap.com"
-]
-
-# Set FFmpeg path
-FFMPEG_LOCATION = "ffmpeg"
-logger.info(f"✅ FFmpeg: {FFMPEG_LOCATION}")
-
-
-def get_ydl_opts(is_audio=False, format_id=None):
-    """Get yt-dlp options with YouTube authentication fixes"""
-    ydl_opts = {
-        "quiet": False,
-        "no_warnings": True,
-        "socket_timeout": 60,
-        "ffmpeg_location": FFMPEG_LOCATION,
-        
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web", "android", "ios"],
-                "player_skip": ["js", "configs"],
-            },
-            "instagram": {
-                "android_api": True,
-            },
-            "snapchat": {
-                "api": True,
-            }
-        },
-        
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Referer": "https://www.youtube.com/",
+            "Origin": "https://www.youtube.com",
+            "DNT": "1",
         },
         
-        "sleep_interval": 3,
-        "max_sleep_interval": 10,
-        "retries": 5,
-        "skip_unavailable_fragments": True,
+        "sleep_interval": 5,
+        "max_sleep_interval": 30,
     }
+    
+    # Добавить cookies если файл существует
+    if cookies_file and os.path.exists(cookies_file):
+        logger.info(f"📎 Using cookies from: {cookies_file}")
+        ydl_opts["cookiefile"] = cookies_file
     
     return ydl_opts
 
